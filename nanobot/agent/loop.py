@@ -18,6 +18,7 @@ from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.memory_search import MemorySearchTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
 
@@ -57,8 +58,9 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-        
-        self.context = ContextBuilder(workspace)
+
+        chroma_dir = Path.home() / ".nanobot" / "data" / "chroma"
+        self.context = ContextBuilder(workspace, chroma_dir=chroma_dir)
         self.sessions = SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -105,6 +107,10 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Memory search tool (for RAG) — only if vector store is active
+        if self.context.memory._vector is not None:
+            self.tools.register(MemorySearchTool(memory=self.context.memory))
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""

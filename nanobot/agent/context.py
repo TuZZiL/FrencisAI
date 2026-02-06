@@ -20,33 +20,34 @@ class ContextBuilder:
     
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, chroma_dir: Path | None = None):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
+        self.memory = MemoryStore(workspace, chroma_dir=chroma_dir)
         self.skills = SkillsLoader(workspace)
     
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(self, skill_names: list[str] | None = None, query: str | None = None) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
-        
+
         Args:
             skill_names: Optional list of skills to include.
-        
+            query: Optional user query for RAG memory search.
+
         Returns:
             Complete system prompt.
         """
         parts = []
-        
+
         # Core identity
         parts.append(self._get_identity())
-        
+
         # Bootstrap files
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-        
+
         # Memory context
-        memory = self.memory.get_memory_context()
+        memory = self.memory.get_memory_context(query=query)
         if memory:
             parts.append(f"# Memory\n\n{memory}")
         
@@ -143,8 +144,8 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         """
         messages = []
 
-        # System prompt
-        system_prompt = self.build_system_prompt(skill_names)
+        # System prompt (pass current message as query for RAG)
+        system_prompt = self.build_system_prompt(skill_names, query=current_message)
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})
