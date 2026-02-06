@@ -174,7 +174,9 @@ class Config(BaseSettings):
             return self.providers.zhipu.api_base
         if "vllm" in model:
             return self.providers.vllm.api_base
-        return None
+        # Fallback: return api_base from the matched provider (anthropic, deepseek, etc.)
+        matched = self._match_provider(model)
+        return matched.api_base if matched else None
     
     class Config:
         env_prefix = "NANOBOT_"

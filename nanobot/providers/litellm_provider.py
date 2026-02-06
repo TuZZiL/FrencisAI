@@ -25,16 +25,21 @@ class LiteLLMProvider(LLMProvider):
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
-        
+
         # Detect OpenRouter by api_key prefix or explicit api_base
         self.is_openrouter = (
             (api_key and api_key.startswith("sk-or-")) or
             (api_base and "openrouter" in api_base)
         )
-        
-        # Track if using custom endpoint (vLLM, etc.)
-        self.is_vllm = bool(api_base) and not self.is_openrouter
-        
+
+        # Known provider prefixes that handle their own api_base
+        _known_providers = ("anthropic", "claude", "deepseek", "openai", "gpt",
+                            "gemini", "zhipu", "glm", "zai", "groq", "moonshot", "kimi")
+        _is_known = any(k in default_model.lower() for k in _known_providers)
+
+        # vLLM = custom endpoint that is NOT a known provider proxy
+        self.is_vllm = bool(api_base) and not self.is_openrouter and not _is_known
+
         # Configure LiteLLM based on provider
         if api_key:
             if self.is_openrouter:
@@ -45,7 +50,7 @@ class LiteLLMProvider(LLMProvider):
                 os.environ["HOSTED_VLLM_API_KEY"] = api_key
             elif "deepseek" in default_model:
                 os.environ.setdefault("DEEPSEEK_API_KEY", api_key)
-            elif "anthropic" in default_model:
+            elif "anthropic" in default_model or "claude" in default_model:
                 os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
             elif "openai" in default_model or "gpt" in default_model:
                 os.environ.setdefault("OPENAI_API_KEY", api_key)
@@ -88,8 +93,10 @@ class LiteLLMProvider(LLMProvider):
         """
         model = model or self.default_model
         
-        # For OpenRouter, prefix model name if not already prefixed
-        if self.is_openrouter and not model.startswith("openrouter/"):
+        # For OpenRouter, always add the litellm "openrouter/" routing prefix.
+        # Config model field = OpenRouter model ID (e.g. "anthropic/claude-sonnet-4-5",
+        # "openrouter/pony-alpha"). LiteLLM needs "openrouter/<model-id>" for routing.
+        if self.is_openrouter:
             model = f"openrouter/{model}"
         
         # For Zhipu/Z.ai, ensure prefix is present
