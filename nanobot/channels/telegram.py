@@ -92,6 +92,7 @@ class TelegramChannel(BaseChannel):
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
         self._typing_tasks: dict[str, asyncio.Task] = {}
+        self._chat_models: dict[str, str] = {}  # Per-chat model override
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -118,9 +119,11 @@ class TelegramChannel(BaseChannel):
         )
         
         # Add command handlers
-        from telegram.ext import CommandHandler
+        from telegram.ext import CommandHandler, CallbackQueryHandler
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("limits", self._on_limits))
+        self._app.add_handler(CommandHandler("model", self._on_model))
+        self._app.add_handler(CallbackQueryHandler(self._on_model_callback, pattern=r"^model:"))
         
         logger.info("Starting Telegram bot (polling mode)...")
         
@@ -132,13 +135,14 @@ class TelegramChannel(BaseChannel):
         bot_info = await self._app.bot.get_me()
         await self._app.bot.set_my_commands([
             ("start", "Start the bot"),
+            ("model", "Switch AI model"),
             ("limits", "Show model token limits"),
         ])
         logger.info(f"Telegram bot @{bot_info.username} connected")
         
         # Start polling (this runs until stopped)
         await self._app.updater.start_polling(
-            allowed_updates=["message"],
+            allowed_updates=["message", "callback_query"],
             drop_pending_updates=True  # Ignore old messages on startup
         )
         
@@ -225,6 +229,81 @@ class TelegramChannel(BaseChannel):
         if not update.message:
             return
 
+        text = await self._fetch_limits_table()
+        if text is None:
+            await update.message.reply_text(
+                "Limits unavailable. Antigravity proxy is not running."
+            )
+            return
+
+        if not text:
+            await update.message.reply_text("No limits data available.")
+            return
+
+        if len(text) > 3900:
+            text = text[:3900] + "\n..."
+
+        await update.message.reply_text(f"<pre>{text}</pre>", parse_mode="HTML")
+
+    async def _on_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /model command — show model picker with inline keyboard."""
+        if not update.message:
+            return
+
+        chat_id = str(update.message.chat_id)
+        current = self._chat_models.get(chat_id, "default")
+
+        # Try to fetch models from Antigravity proxy
+        models = await self._fetch_model_list()
+        if models is None:
+            await update.message.reply_text(
+                "Model switching unavailable. Antigravity proxy is not running."
+            )
+            return
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        # Build keyboard: 2 columns
+        buttons = []
+        row = []
+        for name in models:
+            label = f"✓ {name}" if f"anthropic/{name}" == current else name
+            row.append(InlineKeyboardButton(label, callback_data=f"model:{name}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
+        markup = InlineKeyboardMarkup(buttons)
+        current_display = current.removeprefix("anthropic/") if current != "default" else "default"
+        await update.message.reply_text(
+            f"Current model: <b>{current_display}</b>\nSelect a model:",
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
+
+    async def _on_model_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline keyboard model selection."""
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        await query.answer()
+
+        model_name = query.data.removeprefix("model:")
+        chat_id = str(query.message.chat_id)
+
+        # Store with anthropic/ prefix for LiteLLM routing via Antigravity
+        self._chat_models[chat_id] = f"anthropic/{model_name}"
+
+        await query.edit_message_text(
+            f"Model switched to: <b>{model_name}</b>",
+            parse_mode="HTML",
+        )
+
+    async def _fetch_limits_table(self) -> str | None:
+        """Fetch limits table from Antigravity proxy. Returns text or None on error."""
         try:
             import httpx
             from nanobot.cli.antigravity import ANTIGRAVITY_API_BASE
@@ -235,23 +314,26 @@ class TelegramChannel(BaseChannel):
                 timeout=5,
             )
             if r.status_code != 200:
-                await update.message.reply_text("Failed to fetch limits from proxy.")
-                return
-
-            text = r.text.strip()
-            if not text:
-                await update.message.reply_text("No limits data available.")
-                return
-
-            # Truncate if too long for Telegram (max ~4096 chars)
-            if len(text) > 3900:
-                text = text[:3900] + "\n..."
-
-            await update.message.reply_text(f"<pre>{text}</pre>", parse_mode="HTML")
+                return None
+            return r.text.strip()
         except Exception:
-            await update.message.reply_text(
-                "Limits unavailable. Antigravity proxy is not running."
-            )
+            return None
+
+    async def _fetch_model_list(self) -> list[str] | None:
+        """Fetch available model names from Antigravity proxy. Returns list or None on error."""
+        text = await self._fetch_limits_table()
+        if text is None:
+            return None
+
+        models = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or "%" not in line:
+                continue
+            name = line.split()[0]
+            if name and not name.startswith("-") and not name.startswith("="):
+                models.append(name)
+        return models or None
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages (text, photos, voice, documents)."""
@@ -337,18 +419,22 @@ class TelegramChannel(BaseChannel):
         
         # Forward to the message bus
         await self._start_typing(str(chat_id))
+        model_override = self._chat_models.get(str(chat_id))
+        metadata = {
+            "message_id": message.message_id,
+            "user_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "is_group": message.chat.type != "private",
+        }
+        if model_override:
+            metadata["model"] = model_override
         await self._handle_message(
             sender_id=sender_id,
             chat_id=str(chat_id),
             content=content,
             media=media_paths,
-            metadata={
-                "message_id": message.message_id,
-                "user_id": user.id,
-                "username": user.username,
-                "first_name": user.first_name,
-                "is_group": message.chat.type != "private"
-            }
+            metadata=metadata,
         )
     
     def _get_extension(self, media_type: str, mime_type: str | None) -> str:

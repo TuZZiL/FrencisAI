@@ -191,15 +191,16 @@ class AgentLoop:
         # Agent loop
         iteration = 0
         final_content = None
-        
+        model = msg.metadata.get("model", self.model)
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             # Call LLM
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model
+                model=model
             )
             
             # Handle tool calls
