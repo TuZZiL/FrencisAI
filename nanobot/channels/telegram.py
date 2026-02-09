@@ -117,9 +117,10 @@ class TelegramChannel(BaseChannel):
             )
         )
         
-        # Add /start command handler
+        # Add command handlers
         from telegram.ext import CommandHandler
         self._app.add_handler(CommandHandler("start", self._on_start))
+        self._app.add_handler(CommandHandler("limits", self._on_limits))
         
         logger.info("Starting Telegram bot (polling mode)...")
         
@@ -208,12 +209,45 @@ class TelegramChannel(BaseChannel):
         """Handle /start command."""
         if not update.message or not update.effective_user:
             return
-        
+
         user = update.effective_user
         await update.message.reply_text(
             f"👋 Hi {user.first_name}! I'm nanobot.\n\n"
             "Send me a message and I'll respond!"
         )
+
+    async def _on_limits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /limits command — show Antigravity token limits."""
+        if not update.message:
+            return
+
+        try:
+            import httpx
+            from nanobot.cli.antigravity import ANTIGRAVITY_API_BASE
+
+            r = await asyncio.to_thread(
+                httpx.get,
+                f"{ANTIGRAVITY_API_BASE}/account-limits?format=table",
+                timeout=5,
+            )
+            if r.status_code != 200:
+                await update.message.reply_text("Failed to fetch limits from proxy.")
+                return
+
+            text = r.text.strip()
+            if not text:
+                await update.message.reply_text("No limits data available.")
+                return
+
+            # Truncate if too long for Telegram (max ~4096 chars)
+            if len(text) > 3900:
+                text = text[:3900] + "\n..."
+
+            await update.message.reply_text(f"<pre>{text}</pre>", parse_mode="HTML")
+        except Exception:
+            await update.message.reply_text(
+                "Limits unavailable. Antigravity proxy is not running."
+            )
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages (text, photos, voice, documents)."""
