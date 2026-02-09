@@ -114,8 +114,11 @@ class LiteLLMProvider(LLMProvider):
         ):
             model = f"moonshot/{model}"
 
-        # For Gemini, ensure gemini/ prefix if not already present
-        if "gemini" in model.lower() and not model.startswith("gemini/"):
+        # For Gemini, ensure gemini/ prefix if not already prefixed by another provider
+        if "gemini" in model.lower() and not any(
+            model.lower().startswith(p) for p in
+            ("gemini/", "anthropic/", "openai/", "openrouter/", "zai/", "moonshot/", "groq/")
+        ):
             model = f"gemini/{model}"
 
         # For vLLM, use hosted_vllm/ prefix per LiteLLM docs

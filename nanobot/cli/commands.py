@@ -8,12 +8,14 @@ from rich.console import Console
 from rich.table import Table
 
 from nanobot import __version__, __logo__
+from nanobot.cli.antigravity import app as antigravity_app
 
 app = typer.Typer(
     name="nanobot",
     help=f"{__logo__} nanobot - Personal AI Assistant",
     no_args_is_help=True,
 )
+app.add_typer(antigravity_app, name="antigravity")
 
 console = Console()
 
@@ -40,56 +42,28 @@ def main(
 
 
 @app.command()
+def setup():
+    """Interactive setup wizard — configure provider, model, and channels."""
+    from nanobot.cli.setup_wizard import run_wizard
+    run_wizard()
+
+
+@app.command(hidden=True)
 def onboard():
-    """Initialize nanobot configuration and workspace."""
-    from nanobot.config.loader import get_config_path, save_config
-    from nanobot.config.schema import Config
-    from nanobot.utils.helpers import get_workspace_path
-    
-    config_path = get_config_path()
-    
-    if config_path.exists():
-        console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
-        if not typer.confirm("Overwrite?"):
-            raise typer.Exit()
-    
-    # Create default config
-    config = Config()
-    save_config(config)
-    console.print(f"[green]✓[/green] Created config at {config_path}")
-    
-    # Create workspace
-    workspace = get_workspace_path()
-    console.print(f"[green]✓[/green] Created workspace at {workspace}")
-    
-    # Create default bootstrap files
-    _create_workspace_templates(workspace)
-    
-    console.print(f"\n{__logo__} nanobot is ready!")
-    console.print("\nNext steps:")
-    console.print("  1. Add your API key to [cyan]~/.nanobot/config.json[/cyan]")
-    console.print("     Get one at: https://openrouter.ai/keys")
-    console.print("  2. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
+    """Initialize nanobot (alias for 'setup')."""
+    setup()
 
 
 
 
-def _create_workspace_templates(workspace: Path):
-    """Create default workspace template files."""
-    templates = {
-        "AGENTS.md": """# Agent Instructions
+def _create_workspace_templates(workspace: Path, soul_content: str | None = None):
+    """Create default workspace template files.
 
-You are a helpful AI assistant. Be concise, accurate, and friendly.
-
-## Guidelines
-
-- Always explain what you're doing before taking actions
-- Ask for clarification when the request is ambiguous
-- Use tools to help accomplish tasks
-- Remember important information in your memory files
-""",
-        "SOUL.md": """# Soul
+    Args:
+        workspace: Path to workspace directory.
+        soul_content: Optional custom SOUL.md content. If provided, overwrites existing file.
+    """
+    default_soul = """# Soul
 
 I am nanobot, a lightweight AI assistant.
 
@@ -104,7 +78,20 @@ I am nanobot, a lightweight AI assistant.
 - Accuracy over speed
 - User privacy and safety
 - Transparency in actions
+"""
+    templates = {
+        "AGENTS.md": """# Agent Instructions
+
+You are a helpful AI assistant. Be concise, accurate, and friendly.
+
+## Guidelines
+
+- Always explain what you're doing before taking actions
+- Ask for clarification when the request is ambiguous
+- Use tools to help accomplish tasks
+- Remember important information in your memory files
 """,
+        "SOUL.md": soul_content or default_soul,
         "USER.md": """# User
 
 Information about the user goes here.
@@ -119,9 +106,11 @@ Information about the user goes here.
     
     for filename, content in templates.items():
         file_path = workspace / filename
-        if not file_path.exists():
-            file_path.write_text(content)
-            console.print(f"  [dim]Created {filename}[/dim]")
+        # Always overwrite SOUL.md if custom content was provided
+        if file_path.exists() and not (filename == "SOUL.md" and soul_content):
+            continue
+        file_path.write_text(content)
+        console.print(f"  [dim]Created {filename}[/dim]")
     
     # Create memory directory and MEMORY.md
     memory_dir = workspace / "memory"
@@ -172,9 +161,17 @@ def gateway(
         logging.basicConfig(level=logging.DEBUG)
     
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
-    
+
     config = load_config()
-    
+
+    # Auto-start Antigravity proxy if configured
+    if (config.providers.anthropic.api_key == "antigravity"
+            and config.providers.anthropic.api_base):
+        from nanobot.cli.antigravity import _is_proxy_running, start_proxy
+        if not _is_proxy_running():
+            console.print("[dim]Antigravity configured, starting proxy...[/dim]")
+            start_proxy()
+
     # Create components
     bus = MessageBus()
     
@@ -661,8 +658,16 @@ def status():
         console.print(f"Anthropic API: {'[green]✓[/green]' if has_anthropic else '[dim]not set[/dim]'}")
         console.print(f"OpenAI API: {'[green]✓[/green]' if has_openai else '[dim]not set[/dim]'}")
         console.print(f"Gemini API: {'[green]✓[/green]' if has_gemini else '[dim]not set[/dim]'}")
-        vllm_status = f"[green]✓ {config.providers.vllm.api_base}[/green]" if has_vllm else "[dim]not set[/dim]"
+        vllm_status = f"[green]\u2713 {config.providers.vllm.api_base}[/green]" if has_vllm else "[dim]not set[/dim]"
         console.print(f"vLLM/Local: {vllm_status}")
+
+        # Antigravity proxy status
+        is_antigravity = config.providers.anthropic.api_key == "antigravity"
+        if is_antigravity:
+            from nanobot.cli.antigravity import _is_proxy_running
+            proxy_ok = _is_proxy_running()
+            proxy_status = "[green]\u2713 running[/green]" if proxy_ok else "[red]\u2717 stopped[/red] (run: nanobot antigravity start)"
+            console.print(f"Antigravity: {proxy_status}")
 
 
 if __name__ == "__main__":

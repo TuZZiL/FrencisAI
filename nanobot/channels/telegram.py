@@ -91,6 +91,7 @@ class TelegramChannel(BaseChannel):
         self.groq_api_key = groq_api_key
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
+        self._typing_tasks: dict[str, asyncio.Task] = {}
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -151,12 +152,35 @@ class TelegramChannel(BaseChannel):
             await self._app.shutdown()
             self._app = None
     
+    async def _start_typing(self, chat_id: str) -> None:
+        """Start periodic typing indicator for a chat."""
+        await self._stop_typing(chat_id)
+
+        async def typing_loop() -> None:
+            cid = int(chat_id)
+            while self._running and self._app:
+                try:
+                    await self._app.bot.send_chat_action(chat_id=cid, action="typing")
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+
+        self._typing_tasks[chat_id] = asyncio.create_task(typing_loop())
+
+    async def _stop_typing(self, chat_id: str) -> None:
+        """Stop typing indicator for a chat."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task:
+            task.cancel()
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Telegram."""
         if not self._app:
             logger.warning("Telegram bot not running")
             return
         
+        await self._stop_typing(msg.chat_id)
+
         try:
             # chat_id should be the Telegram chat ID (integer)
             chat_id = int(msg.chat_id)
@@ -274,6 +298,7 @@ class TelegramChannel(BaseChannel):
         logger.debug(f"Telegram message from {sender_id}: {content[:50]}...")
         
         # Forward to the message bus
+        await self._start_typing(str(chat_id))
         await self._handle_message(
             sender_id=sender_id,
             chat_id=str(chat_id),
