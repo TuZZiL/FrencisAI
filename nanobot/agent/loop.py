@@ -19,6 +19,7 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.memory_search import MemorySearchTool
+from nanobot.agent.tools.claude_code import ClaudeCodeTool, is_claude_available
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager, Session
 
@@ -129,6 +130,11 @@ class AgentLoop:
         # Memory search tool (for RAG) — only if vector store is active
         if self.context.memory._vector is not None:
             self.tools.register(MemorySearchTool(memory=self.context.memory))
+
+        # Claude Code tool — only if claude CLI is in PATH
+        if is_claude_available():
+            self.tools.register(ClaudeCodeTool(working_dir=str(self.workspace)))
+            logger.info("Claude Code CLI detected, claude_code tool registered")
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
