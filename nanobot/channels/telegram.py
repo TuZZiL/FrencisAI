@@ -93,6 +93,7 @@ class TelegramChannel(BaseChannel):
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._chat_models: dict[str, str] = {}  # Per-chat model override
+        self._chat_utility_models: dict[str, str] = {}  # Per-chat utility model (summary/extraction)
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -123,7 +124,9 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("limits", self._on_limits))
         self._app.add_handler(CommandHandler("model", self._on_model))
+        self._app.add_handler(CommandHandler("smodel", self._on_smodel))
         self._app.add_handler(CallbackQueryHandler(self._on_model_callback, pattern=r"^model:"))
+        self._app.add_handler(CallbackQueryHandler(self._on_smodel_callback, pattern=r"^smodel:"))
         
         logger.info("Starting Telegram bot (polling mode)...")
         
@@ -136,6 +139,7 @@ class TelegramChannel(BaseChannel):
         await self._app.bot.set_my_commands([
             ("start", "Start the bot"),
             ("model", "Switch AI model"),
+            ("smodel", "Switch utility model (summary/memory)"),
             ("limits", "Show model token limits"),
         ])
         logger.info(f"Telegram bot @{bot_info.username} connected")
@@ -302,6 +306,60 @@ class TelegramChannel(BaseChannel):
             parse_mode="HTML",
         )
 
+    async def _on_smodel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /smodel command — pick utility model for summarization/extraction."""
+        if not update.message:
+            return
+
+        chat_id = str(update.message.chat_id)
+        current = self._chat_utility_models.get(chat_id, "default")
+
+        models = await self._fetch_model_list()
+        if models is None:
+            await update.message.reply_text(
+                "Model switching unavailable. Antigravity proxy is not running."
+            )
+            return
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        buttons = []
+        row = []
+        for name in models:
+            label = f"✓ {name}" if f"anthropic/{name}" == current else name
+            row.append(InlineKeyboardButton(label, callback_data=f"smodel:{name}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
+        markup = InlineKeyboardMarkup(buttons)
+        current_display = current.removeprefix("anthropic/") if current != "default" else "default"
+        await update.message.reply_text(
+            f"Utility model (summary & memory): <b>{current_display}</b>\nSelect a model:",
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
+
+    async def _on_smodel_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline keyboard utility model selection."""
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        await query.answer()
+
+        model_name = query.data.removeprefix("smodel:")
+        chat_id = str(query.message.chat_id)
+
+        self._chat_utility_models[chat_id] = f"anthropic/{model_name}"
+
+        await query.edit_message_text(
+            f"Utility model switched to: <b>{model_name}</b>",
+            parse_mode="HTML",
+        )
+
     async def _fetch_limits_table(self) -> str | None:
         """Fetch limits table from Antigravity proxy. Returns text or None on error."""
         try:
@@ -429,6 +487,9 @@ class TelegramChannel(BaseChannel):
         }
         if model_override:
             metadata["model"] = model_override
+        utility_model = self._chat_utility_models.get(str(chat_id))
+        if utility_model:
+            metadata["utility_model"] = utility_model
         await self._handle_message(
             sender_id=sender_id,
             chat_id=str(chat_id),

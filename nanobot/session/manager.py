@@ -15,16 +15,17 @@ from nanobot.utils.helpers import ensure_dir, safe_filename
 class Session:
     """
     A conversation session.
-    
+
     Stores messages in JSONL format for easy reading and persistence.
     """
-    
+
     key: str  # channel:chat_id
     messages: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
-    
+    summary: str = ""
+
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
         msg = {
@@ -35,26 +36,40 @@ class Session:
         }
         self.messages.append(msg)
         self.updated_at = datetime.now()
-    
+
     def get_history(self, max_messages: int = 50) -> list[dict[str, Any]]:
         """
         Get message history for LLM context.
-        
-        Args:
-            max_messages: Maximum messages to return.
-        
-        Returns:
-            List of messages in LLM format.
+
+        If a summary exists, it is prepended as a system message so the LLM
+        retains context from older (trimmed) messages.
         """
-        # Get recent messages
         recent = self.messages[-max_messages:] if len(self.messages) > max_messages else self.messages
-        
-        # Convert to LLM format (just role and content)
-        return [{"role": m["role"], "content": m["content"]} for m in recent]
-    
+        history = [{"role": m["role"], "content": m["content"]} for m in recent]
+
+        if self.summary:
+            history.insert(0, {
+                "role": "system",
+                "content": f"[Summary of earlier conversation]\n{self.summary}",
+            })
+
+        return history
+
+    def set_summary(self, summary: str) -> None:
+        """Set conversation summary (compressed old messages)."""
+        self.summary = summary
+        self.updated_at = datetime.now()
+
+    def trim(self, keep_recent: int = 20) -> None:
+        """Remove old messages, keeping only the most recent ones."""
+        if len(self.messages) > keep_recent:
+            self.messages = self.messages[-keep_recent:]
+            self.updated_at = datetime.now()
+
     def clear(self) -> None:
         """Clear all messages in the session."""
         self.messages = []
+        self.summary = ""
         self.updated_at = datetime.now()
 
 
@@ -127,7 +142,8 @@ class SessionManager:
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
-                metadata=metadata
+                metadata=metadata,
+                summary=metadata.get("summary", ""),
             )
         except Exception as e:
             logger.warning(f"Failed to load session {key}: {e}")
@@ -138,12 +154,15 @@ class SessionManager:
         path = self._get_session_path(session.key)
         
         with open(path, "w") as f:
-            # Write metadata first
+            # Write metadata first (includes summary)
+            meta = {**session.metadata}
+            if session.summary:
+                meta["summary"] = session.summary
             metadata_line = {
                 "_type": "metadata",
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata
+                "metadata": meta,
             }
             f.write(json.dumps(metadata_line) + "\n")
             

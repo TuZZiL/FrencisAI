@@ -20,7 +20,25 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.memory_search import MemorySearchTool
 from nanobot.agent.subagent import SubagentManager
-from nanobot.session.manager import SessionManager
+from nanobot.session.manager import SessionManager, Session
+
+
+SUMMARY_THRESHOLD = 30  # Summarize when messages exceed this count
+KEEP_RECENT = 20        # Keep this many recent messages after trimming
+
+SUMMARIZE_PROMPT = (
+    "Summarize the following conversation concisely. "
+    "Capture: key topics, decisions made, user preferences, important context. "
+    "Keep it under 300 words. Write in the same language the conversation uses."
+)
+
+EXTRACT_PROMPT = (
+    "Extract key NEW facts from this conversation exchange. "
+    "Only list information worth remembering long-term: user preferences, "
+    "personal details, important decisions, recurring topics. "
+    "If nothing notable, respond with exactly NONE. "
+    "Be very brief, use bullet points. Write in the conversation's language."
+)
 
 
 class AgentLoop:
@@ -162,9 +180,13 @@ class AgentLoop:
             return await self._process_system_message(msg)
         
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}")
-        
+
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
+
+        # Summarize old messages if session is long
+        utility_model = msg.metadata.get("utility_model") or msg.metadata.get("model") or self.model
+        await self._maybe_summarize_session(session, utility_model, msg.channel, msg.chat_id)
         
         # Update tool contexts
         message_tool = self.tools.get("message")
@@ -241,13 +263,91 @@ class AgentLoop:
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
-        
+
+        # Background: extract facts from this exchange
+        asyncio.create_task(
+            self._extract_facts(msg.content, final_content, utility_model, msg.channel, msg.chat_id)
+        )
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content
         )
     
+    async def _maybe_summarize_session(
+        self, session: Session, utility_model: str, channel: str, chat_id: str,
+    ) -> None:
+        """Summarize old messages if session exceeds threshold."""
+        if len(session.messages) <= SUMMARY_THRESHOLD:
+            return
+
+        try:
+            # Take messages that will be trimmed
+            old_messages = session.messages[:-KEEP_RECENT]
+            conversation = "\n".join(
+                f"{m['role']}: {m['content']}" for m in old_messages
+            )
+
+            # Include existing summary for continuity
+            if session.summary:
+                conversation = f"[Previous summary]\n{session.summary}\n\n[Conversation]\n{conversation}"
+
+            response = await self.provider.chat(
+                messages=[
+                    {"role": "system", "content": SUMMARIZE_PROMPT},
+                    {"role": "user", "content": conversation},
+                ],
+                model=utility_model,
+                max_tokens=1024,
+            )
+
+            if response.content:
+                session.set_summary(response.content)
+                session.trim(keep_recent=KEEP_RECENT)
+                self.sessions.save(session)
+                logger.info(f"Session {session.key}: summarized {len(old_messages)} old messages")
+        except Exception as e:
+            logger.warning(f"Session summarization failed: {e}")
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=f"⚠️ Session summarization failed: {e}\nUse /smodel to change utility model.",
+            ))
+
+    async def _extract_facts(
+        self, user_msg: str, assistant_msg: str, utility_model: str,
+        channel: str, chat_id: str,
+    ) -> None:
+        """Extract key facts from a conversation exchange and save to daily notes."""
+        # Skip trivial messages
+        if len(user_msg) < 20 and len(assistant_msg) < 50:
+            return
+
+        try:
+            exchange = f"User: {user_msg}\n\nAssistant: {assistant_msg}"
+
+            response = await self.provider.chat(
+                messages=[
+                    {"role": "system", "content": EXTRACT_PROMPT},
+                    {"role": "user", "content": exchange},
+                ],
+                model=utility_model,
+                max_tokens=512,
+            )
+
+            result = response.content.strip() if response.content else ""
+            if result and result.upper() != "NONE":
+                self.context.memory.append_today(f"\n### Auto-extracted\n{result}")
+                logger.debug(f"Extracted facts: {result[:80]}...")
+        except Exception as e:
+            logger.warning(f"Fact extraction failed: {e}")
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=f"⚠️ Fact extraction failed: {e}\nUse /smodel to change utility model.",
+            ))
+
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a system message (e.g., subagent announce).
