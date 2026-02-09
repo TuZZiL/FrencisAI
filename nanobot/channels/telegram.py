@@ -128,8 +128,12 @@ class TelegramChannel(BaseChannel):
         await self._app.initialize()
         await self._app.start()
         
-        # Get bot info
+        # Get bot info and register command menu
         bot_info = await self._app.bot.get_me()
+        await self._app.bot.set_my_commands([
+            ("start", "Start the bot"),
+            ("limits", "Show model token limits"),
+        ])
         logger.info(f"Telegram bot @{bot_info.username} connected")
         
         # Start polling (this runs until stopped)
